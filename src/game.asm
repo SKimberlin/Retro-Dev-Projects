@@ -15,7 +15,7 @@ SPRITE_BALL_ADDR = oam + 16
 .byte 'N', 'E', 'S', $1a      ; "NES" followed by MS-DOS EOF marker
 .byte $02                     ; 2 x 16KB PRG-ROM banks
 .byte $01                     ; 1 x 8KB CHR-ROM bank
-.byte $00, $00                ; Mapper 0, no special features
+.byte $01, $00                ; Mapper 0, no special features
 
 ;*****************************************************************
 ; Define NES interrupt vectors
@@ -52,7 +52,14 @@ controller_1_pressed:   .res 1    ; Check if pressed
 controller_1_released:  .res 1    ; Check if released
 
 ; Reserve remaining space in this section if needed
-                        .res 10   ; Pad to $20 (optional)
+quotient:               .res 1
+remainder:              .res 1
+dividend:               .res 1
+divisor:                .res 1
+digit_ones:             .res 1
+digit_tens:             .res 1
+digit_hundreds:         .res 1
+                        .res 3   ; Pad to $20 (optional)
 
 ; $20-$2F: Game state variables
 game_state:             .res 1    ; Current game state
@@ -93,6 +100,29 @@ oam: .res 256	; sprite OAM data
 
 ; Non-Maskable Interrupt Handler - called during VBlank
 .proc nmi_handler
+  ; save registers
+  PHA
+  TXA
+  PHA
+  TYA
+  PHA
+
+  INC time
+  LDA time
+  CMP #60
+  BNE skip
+    INC seconds
+    LDA #0
+    STA time
+  skip:
+
+
+  ; restore registers
+  PLA
+  TAY
+  PLA
+  TAX
+  PLA
 
   RTI                     ; Return from interrupt (not using NMI yet)
 .endproc
@@ -179,14 +209,6 @@ remaining_loop:
   ; print text
   ; draw some text on the screen
   LDX #0
-text_loop:
-  LDA hello_txt, X
-  STA PPU_VRAM_IO
-  INX
-  CMP #0
-  BEQ :+
-  JMP text_loop
-:
 
   ; Reset scroll registers to 0,0 (needed after VRAM access)
   LDA #$00
@@ -198,6 +220,15 @@ text_loop:
 .endproc
 
 .proc init_sprites
+  LDX #0
+load_sprite:
+  ;LDA sprite_data, X
+  ;STA SPRITE_PLAYER0_ADDR, X
+
+  ;INX
+  ;CPX #$4
+  ;BNE load_sprite
+
   ; set sprite tiles
   LDA #1
   STA SPRITE_0_ADDR + SPRITE_OFFSET_TILE
@@ -268,11 +299,11 @@ text_loop:
   STA SPRITE_2_ADDR + SPRITE_OFFSET_Y
   STA SPRITE_3_ADDR + SPRITE_OFFSET_Y
 
-  ;INC scroll
+  ;LDA #$00
+  ;STA PPU_SCROLL                         ; Write horizontal scroll
+  ;DEC scroll
   ;LDA scroll
-  LDA #$00
-  STA PPU_SCROLL                         ; Write horizontal scroll
-  STA PPU_SCROLL                         ; Write vertical scroll
+  ;STA PPU_SCROLL                         ; Write vertical scroll
 
   ; Set OAM address to 0 — required before DMA or manual OAM writes
   LDA #$00
@@ -328,7 +359,6 @@ NOT_HITRIGHT:
     AND #PAD_L
     BEQ not_left
       LDA player_x
-      ;DEX
       SEC
       SBC #$01
       STA player_x
@@ -358,6 +388,115 @@ not_left:
       STA player_y
   not_down:
     RTS                       ; Return to caller
+.endproc
+
+;**************************************************************************
+; Subroutine: divide
+; Description: Performs 8-bit binary division using restoring division method.
+;              Takes values from `dividend` and `divisor`, stores the result
+;              in `quotient` and `remainder`.
+;**************************************************************************
+.proc divide
+
+  LDA #$00            ; Clear A to start with a zero remainder
+  STA quotient        ; Clear quotient
+  LDX #$08            ; Set up loop counter for 8 bits (binary long division)
+
+divide_loop:
+  ASL dividend        ; Shift left dividend bit into carry (MSB first)
+  ROL                 ; Rotate carry into remainder (A)
+  CMP divisor         ; Compare remainder (A) to divisor
+  PHP                 ; Save comparison result (carry) on stack
+  ROL quotient        ; Rotate carry (result of compare) into quotient
+  PLP                 ; Restore comparison result
+  BCC nosbc           ; If remainder < divisor, skip subtraction
+  SBC divisor         ; Subtract divisor from remainder (A) if >=
+
+nosbc:
+  DEX                 ; Decrement loop counter
+  BNE divide_loop     ; Repeat until 8 bits are processed
+
+  STA remainder       ; Store final remainder
+  RTS                 ; Return
+
+.endproc
+
+;**************************************************************************
+; Subroutine: get_time_digits
+; Description: Converts the `seconds` value into decimal digits
+;              and stores each digit (ones, tens, hundreds) separately.
+;              Used for drawing the time.
+;**************************************************************************
+.proc get_time_digits
+
+  ; ---- Ones digit (seconds % 10) ----
+  LDA seconds
+  STA dividend         ; Load seconds into dividend
+  LDA #10
+  STA divisor          ; Set divisor to 10
+  JSR divide           ; Perform division
+
+  LDA remainder
+  STA digit_ones       ; Store remainder as ones digit
+
+  ; ---- Tens digit ((seconds / 10) % 10) ----
+  LDA quotient
+  STA dividend         ; Load previous quotient as new dividend
+  LDA #10
+  STA divisor
+  JSR divide           ; Divide again
+
+  LDA remainder
+  STA digit_tens       ; Store remainder as tens digit
+
+  ; ---- Hundreds digit (seconds / 100) ----
+  LDA quotient
+  STA dividend         ; Load previous quotient again
+  LDA #10
+  STA divisor
+  JSR divide
+
+  LDA remainder
+  STA digit_hundreds   ; Store remainder as hundreds digit
+
+  RTS                  ; Return
+
+.endproc
+
+
+.proc draw_time
+  ; Reset the PPU address latch
+  LDA PPU_STATUS
+
+  ; Set PPU address
+  LDA #$20
+  STA PPU_ADDRESS
+  LDA #$39
+  STA PPU_ADDRESS
+
+  ; Print hundreds digit
+  LDA #'0'
+  CLC
+  ADC digit_hundreds
+  STA PPU_VRAM_IO
+
+  ; Print tens digit
+  LDA #'0'
+  CLC
+  ADC digit_tens
+  STA PPU_VRAM_IO
+
+  ; Print ones digit
+  LDA #'0'
+  CLC
+  ADC digit_ones
+  STA PPU_VRAM_IO
+
+  LDA #0
+  STA PPU_SCROLL
+  STA PPU_SCROLL
+
+  RTS
 .endproc
 
 ;******************************************************************************
@@ -397,8 +536,10 @@ forever:
     JSR read_controller
     JSR update_player
     JSR update_ball
+    JSR get_time_digits
 
     ; Update sprite data (DMA transfer to PPU OAM)
+    JSR draw_time
     JSR update_sprites
 
     ; Infinite loop — keep running frame logic
@@ -499,6 +640,11 @@ palette_data:
 ; Load nametable data
 nametable_data:
   .incbin "assets/screen.nam"
+sprite_data:
+.byte 30, 1, 0, 40
+.byte 30, 2, 0, 48
+.byte 38, 3, 0, 40
+.byte 38, 4, 0, 48
 
 hello_txt:
 .byte 'H','E','L','L', 'O', ' ', 'W', 'O', 'R', 'L', 'D', 0
